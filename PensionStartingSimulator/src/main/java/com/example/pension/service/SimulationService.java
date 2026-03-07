@@ -119,20 +119,59 @@ public class SimulationService {
 
             double balance = req.dcBalance;
 
-            for (int age = req.startAge;
-                 age <= req.lifeExpectancy;
-                 age++) {
+            double inflationMultiplier = 1.0;
+            double pensionMultiplier = 1.0;
 
+            for (int age = req.startAge; age <= req.lifeExpectancy; age++) {
+
+                // ランダム利回り
                 double randomReturn =
                     req.dcReturnRate +
-                    req.returnVolatility *
-                    rand.nextGaussian();
+                    req.returnVolatility * rand.nextGaussian();
 
                 balance = balance * (1 + randomReturn);
+
+                double income = 0;
+
+                double yearlyExpense =
+                    (req.basicLivingCost + req.leisureCost)
+                    * 12
+                    * inflationMultiplier;
+
+                // 給与
+                if (age < req.retirementAge) {
+                    income += req.salaryAfter60 * 12 * SALARY_NET_RATE;
+                }
+
+                // 年金
+                if (age >= req.pensionStartAge) {
+                    income +=
+                        req.publicPension
+                        * 12
+                        * pensionMultiplier
+                        * PENSION_NET_RATE;
+                }
+
+                double shortfall = yearlyExpense - income;
+
+                if (shortfall > 0) {
+
+                    double withdrawalNeeded =
+                        shortfall / PENSION_NET_RATE;
+
+                    balance -= withdrawalNeeded;
+                }
 
                 if (balance <= 0) {
                     failureCount++;
                     break;
+                }
+
+                inflationMultiplier *= (1 + req.inflationRate);
+
+                if (age >= req.pensionStartAge) {
+                    pensionMultiplier *=
+                        (1 + req.inflationRate * 0.8);
                 }
             }
         }
