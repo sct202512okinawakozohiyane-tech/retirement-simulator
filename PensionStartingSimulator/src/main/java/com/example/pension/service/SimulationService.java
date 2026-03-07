@@ -60,10 +60,13 @@ public class SimulationService {
             if (shortfall > 0 && balance > 0) {
 
                 // 不足分だけ取り崩す
-                double withdrawal = Math.min(shortfall, balance);
+            	double withdrawalNeeded = shortfall / PENSION_NET_RATE;
 
-                balance -= withdrawal;
-                income += withdrawal * PENSION_NET_RATE; // 取り崩しも税・社会保険の対象とする場合;
+            	double withdrawal = Math.min(withdrawalNeeded, balance);
+
+            	balance -= withdrawal;
+
+            	income += withdrawal * PENSION_NET_RATE; // 取り崩しも税・社会保険の対象とする場合;
             }
 
             // 念のためゼロ未満防止
