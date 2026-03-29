@@ -2,7 +2,7 @@ package com.example.pension.service;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 
 import org.springframework.stereotype.Service;
 
@@ -27,63 +27,15 @@ public class SimulationService {
 
         for (int age = request.startAge; age <= request.lifeExpectancy; age++) {
 
-            // 年初運用
-            balance = balance * (1 + request.dcReturnRate);
+            balance = calculateYearEndBalance(request, balance, 0);
 
-            double income = 0;
+            YearResult year = simulateYear(
+                request, age, balance, inflationMultiplier, pensionMultiplier);
 
-            double yearlyExpense =
-                (request.basicLivingCost + request.leisureCost)
-                * 12
-                * inflationMultiplier;
-
-            // 給与
-            if (age < request.retirementAge) {
-                double salaryNet =
-                    request.salaryAfter60 * 12 * SALARY_NET_RATE;
-                income += salaryNet;
-            }
-
-            // 年金
-            if (age >= request.pensionStartAge) {
-
-                double pensionNet =
-                    request.publicPension
-                    * 12
-                    * pensionMultiplier
-                    * PENSION_NET_RATE;
-
-                income += pensionNet;
-            }
-
-            double shortfall = yearlyExpense - income;
-
-            if (shortfall > 0 && balance > 0) {
-
-                double withdrawalNeeded =
-                    shortfall / PENSION_NET_RATE;
-
-                double withdrawal =
-                    Math.min(withdrawalNeeded, balance);
-
-                balance -= withdrawal;
-
-                income += withdrawal * PENSION_NET_RATE;
-            }
-
-            if (balance < 0) {
-                balance = 0;
-            }
-
+            balance = year.balance;
             if (balance == 0 && depletionAge == null) {
                 depletionAge = age;
             }
-
-            YearResult year = new YearResult();
-            year.age = age;
-            year.income = Math.round(income);
-            year.expense = Math.round(yearlyExpense);
-            year.balance = Math.round(balance);
 
             results.add(year);
 
@@ -100,78 +52,106 @@ public class SimulationService {
         response.assetDepletionAge =
             (depletionAge == null) ? -1 : depletionAge;
 
-        // ★モンテカルロ計算
         response.failureProbability =
             calculateFailureProbability(request);
 
         return response;
     }
 
-    // ★モンテカルロ
-    private double calculateFailureProbability(SimulationRequest req) {
+    private YearResult simulateYear(SimulationRequest request, int age,
+            double balance, double inflationMultiplier, double pensionMultiplier) {
+
+        double income = 0;
+
+        double yearlyExpense =
+            (request.basicLivingCost + request.leisureCost)
+            * 12
+            * inflationMultiplier;
+
+        if (age < request.retirementAge) {
+            double salaryNet =
+                request.salaryAfter60 * 12 * SALARY_NET_RATE;
+            income += salaryNet;
+        }
+
+        if (age >= request.pensionStartAge) {
+
+            double pensionNet =
+                request.publicPension
+                * 12
+                * pensionMultiplier
+                * PENSION_NET_RATE;
+
+            income += pensionNet;
+        }
+
+        double shortfall = yearlyExpense - income;
+
+        if (shortfall > 0 && balance > 0) {
+
+            double withdrawalNeeded =
+                shortfall / PENSION_NET_RATE;
+
+            double withdrawal =
+                Math.min(withdrawalNeeded, balance);
+
+            balance -= withdrawal;
+
+            income += withdrawal * PENSION_NET_RATE;
+        }
+
+        if (balance < 0) {
+            balance = 0;
+        }
+
+        YearResult year = new YearResult();
+        year.age = age;
+        year.income = Math.round(income);
+        year.expense = Math.round(yearlyExpense);
+        year.balance = Math.round(balance);
+
+        return year;
+    }
+
+    private double calculateYearEndBalance(SimulationRequest request,
+            double balance, double returnRate) {
+        return balance * (1 + request.dcReturnRate + returnRate);
+    }
+
+    private double calculateFailureProbability(SimulationRequest request) {
 
         int simulations = 1000;
         int failureCount = 0;
 
-        Random rand = new Random();
-
         for (int i = 0; i < simulations; i++) {
 
-            double balance = req.dcBalance;
+            double balance = request.dcBalance;
 
             double inflationMultiplier = 1.0;
             double pensionMultiplier = 1.0;
 
-            for (int age = req.startAge; age <= req.lifeExpectancy; age++) {
+            for (int age = request.startAge; age <= request.lifeExpectancy; age++) {
 
-                // ランダム利回り
                 double randomReturn =
-                    req.dcReturnRate +
-                    req.returnVolatility * rand.nextGaussian();
+                    request.returnVolatility * ThreadLocalRandom.current().nextGaussian();
 
-                balance = balance * (1 + randomReturn);
+                balance = calculateYearEndBalance(request, balance, randomReturn);
 
-                double income = 0;
+                YearResult year = simulateYear(
+                    request, age, balance, inflationMultiplier, pensionMultiplier);
 
-                double yearlyExpense =
-                    (req.basicLivingCost + req.leisureCost)
-                    * 12
-                    * inflationMultiplier;
-
-                // 給与
-                if (age < req.retirementAge) {
-                    income += req.salaryAfter60 * 12 * SALARY_NET_RATE;
-                }
-
-                // 年金
-                if (age >= req.pensionStartAge) {
-                    income +=
-                        req.publicPension
-                        * 12
-                        * pensionMultiplier
-                        * PENSION_NET_RATE;
-                }
-
-                double shortfall = yearlyExpense - income;
-
-                if (shortfall > 0) {
-
-                    double withdrawalNeeded =
-                        shortfall / PENSION_NET_RATE;
-
-                    balance -= withdrawalNeeded;
-                }
+                balance = year.balance;
 
                 if (balance <= 0) {
                     failureCount++;
                     break;
                 }
 
-                inflationMultiplier *= (1 + req.inflationRate);
+                inflationMultiplier *= (1 + request.inflationRate);
 
-                if (age >= req.pensionStartAge) {
+                if (age >= request.pensionStartAge) {
                     pensionMultiplier *=
-                        (1 + req.inflationRate * 0.8);
+                        (1 + request.inflationRate * 0.8);
                 }
             }
         }
