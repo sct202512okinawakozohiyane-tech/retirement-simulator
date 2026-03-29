@@ -87,7 +87,7 @@ public class SimulationService {
 
         double shortfall = yearlyExpense - income;
 
-        if (shortfall > 0 && balance > 0) {
+        if (shortfall > 0 && balance > 0 && age >= 60) {
 
             double withdrawalNeeded =
                 shortfall / PENSION_NET_RATE;
