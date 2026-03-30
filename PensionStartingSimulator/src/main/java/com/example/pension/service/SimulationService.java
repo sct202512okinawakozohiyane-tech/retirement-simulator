@@ -17,6 +17,7 @@ public class SimulationService {
     private static final double PENSION_NET_RATE = 0.9;
 
     public SimulationResponse simulate(SimulationRequest request) {
+        validateRequest(request);
 
         double balance = request.dcBalance;
         List<YearResult> results = new ArrayList<>();
@@ -27,12 +28,10 @@ public class SimulationService {
 
         for (int age = request.startAge; age <= request.lifeExpectancy; age++) {
 
-            balance = calculateYearEndBalance(request, balance, 0);
-
             YearResult year = simulateYear(
                 request, age, balance, inflationMultiplier, pensionMultiplier);
 
-            balance = year.balance;
+            balance = calculateYearEndBalance(request, year.balance, 0);
             if (balance == 0 && depletionAge == null) {
                 depletionAge = age;
             }
@@ -87,7 +86,7 @@ public class SimulationService {
 
         double shortfall = yearlyExpense - income;
 
-        if (shortfall > 0 && balance > 0 && age >= 60) {
+        if (shortfall > 0 && balance > 0 && age >= request.pensionStartAge) {
 
             double withdrawalNeeded =
                 shortfall / PENSION_NET_RATE;
@@ -108,7 +107,7 @@ public class SimulationService {
         year.age = age;
         year.income = Math.round(income);
         year.expense = Math.round(yearlyExpense);
-        year.balance = Math.round(balance);
+        year.balance = balance;
 
         return year;
     }
@@ -116,6 +115,46 @@ public class SimulationService {
     private double calculateYearEndBalance(SimulationRequest request,
             double balance, double returnRate) {
         return balance * (1 + request.dcReturnRate + returnRate);
+    }
+
+    private void validateRequest(SimulationRequest request) {
+        if (request.startAge < 0 || request.lifeExpectancy <= 0) {
+            throw new IllegalArgumentException("Invalid age parameters");
+        }
+        if (request.startAge >= request.lifeExpectancy) {
+            throw new IllegalArgumentException("startAge must be less than lifeExpectancy");
+        }
+        if (request.retirementAge < 0 || request.pensionStartAge < 0) {
+            throw new IllegalArgumentException("Invalid retirement or pension age");
+        }
+        if (request.inflationRate < 0 || request.dcReturnRate < -1) {
+            throw new IllegalArgumentException("Invalid rate parameters");
+        }
+        if (request.dcBalance < 0 || request.basicLivingCost < 0 || request.leisureCost < 0) {
+            throw new IllegalArgumentException("Invalid cost parameters");
+        }
+    }
+
+    private double[] simulateSingleYear(SimulationRequest request, int age,
+            double balance, double inflationMultiplier, double pensionMultiplier,
+            double returnRate) {
+
+        YearResult year = simulateYear(
+            request, age, balance, inflationMultiplier, pensionMultiplier);
+
+        balance = calculateYearEndBalance(request, year.balance, returnRate);
+
+        if (balance <= 0) {
+            balance = 0;
+        }
+
+        inflationMultiplier *= (1 + request.inflationRate);
+
+        if (age >= request.pensionStartAge) {
+            pensionMultiplier *= (1 + request.inflationRate * 0.8);
+        }
+
+        return new double[] {balance, inflationMultiplier, pensionMultiplier};
     }
 
     private double calculateFailureProbability(SimulationRequest request) {
@@ -135,23 +174,15 @@ public class SimulationService {
                 double randomReturn =
                     request.returnVolatility * ThreadLocalRandom.current().nextGaussian();
 
-                balance = calculateYearEndBalance(request, balance, randomReturn);
-
-                YearResult year = simulateYear(
-                    request, age, balance, inflationMultiplier, pensionMultiplier);
-
-                balance = year.balance;
+                double[] result = simulateSingleYear(request, age, balance,
+                    inflationMultiplier, pensionMultiplier, randomReturn);
+                balance = result[0];
+                inflationMultiplier = result[1];
+                pensionMultiplier = result[2];
 
                 if (balance <= 0) {
                     failureCount++;
                     break;
-                }
-
-                inflationMultiplier *= (1 + request.inflationRate);
-
-                if (age >= request.pensionStartAge) {
-                    pensionMultiplier *=
-                        (1 + request.inflationRate * 0.8);
                 }
             }
         }
