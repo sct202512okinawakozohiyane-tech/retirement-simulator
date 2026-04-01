@@ -1,5 +1,7 @@
 package com.example.pension.service;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
@@ -13,180 +15,142 @@ import com.example.pension.model.YearResult;
 @Service
 public class SimulationService {
 
-    private static final double SALARY_NET_RATE = 0.8;
-    private static final double PENSION_NET_RATE = 0.9;
+    private static final BigDecimal SALARY_NET_RATE = new BigDecimal("0.8");
+    private static final BigDecimal PENSION_NET_RATE = new BigDecimal("0.9");
 
     public SimulationResponse simulate(SimulationRequest request) {
         validateRequest(request);
 
-        double balance = request.dcBalance;
+        BigDecimal balance = BigDecimal.valueOf(request.dcBalance);
         List<YearResult> results = new ArrayList<>();
 
-        double inflationMultiplier = 1.0;
-        double pensionMultiplier = 1.0;
+        BigDecimal inflationMultiplier = BigDecimal.ONE;
+        BigDecimal pensionMultiplier = BigDecimal.ONE;
         Integer depletionAge = null;
 
         for (int age = request.startAge; age <= request.lifeExpectancy; age++) {
-
-            YearResult year = simulateYear(
-                request, age, balance, inflationMultiplier, pensionMultiplier);
-
-            balance = calculateYearEndBalance(request, year.balance, 0);
-            if (balance == 0 && depletionAge == null) {
-                depletionAge = age;
-            }
-
+            // 1年分のステップ計算 (決定論的: randomReturn=0)
+            SimulationStepResult step = runYearlyStep(request, age, balance, inflationMultiplier, pensionMultiplier, BigDecimal.ZERO);
+            
+            YearResult year = new YearResult();
+            year.setAge(age);
+            year.setIncome(step.income.setScale(0, RoundingMode.HALF_UP).doubleValue());
+            year.setExpense(step.expense.setScale(0, RoundingMode.HALF_UP).doubleValue());
+            year.setBalance(step.endBalance.doubleValue());
             results.add(year);
 
-            inflationMultiplier *= (1 + request.inflationRate);
+            balance = step.endBalance;
+            inflationMultiplier = step.nextInflationMultiplier;
+            pensionMultiplier = step.nextPensionMultiplier;
 
-            if (age >= request.pensionStartAge) {
-                pensionMultiplier *= (1 + request.inflationRate * 0.8);
+            if (balance.compareTo(BigDecimal.ZERO) <= 0 && depletionAge == null) {
+                depletionAge = age;
             }
         }
 
         SimulationResponse response = new SimulationResponse();
-        response.remainingBalanceAt100 = balance;
-        response.yearlyResults = results;
-        response.assetDepletionAge =
-            (depletionAge == null) ? -1 : depletionAge;
-
-        response.failureProbability =
-            calculateFailureProbability(request);
+        response.setRemainingBalanceAt100(balance.doubleValue());
+        response.setYearlyResults(results);
+        response.setAssetDepletionAge((depletionAge == null) ? -1 : depletionAge);
+        response.setFailureProbability(calculateFailureProbability(request));
 
         return response;
     }
 
-    private YearResult simulateYear(SimulationRequest request, int age,
-            double balance, double inflationMultiplier, double pensionMultiplier) {
+    private SimulationStepResult runYearlyStep(SimulationRequest request, int age, BigDecimal startBalance, 
+                                             BigDecimal inflationMultiplier, BigDecimal pensionMultiplier, BigDecimal randomReturn) {
+        
+        // 支出計算
+        BigDecimal yearlyExpense = BigDecimal.valueOf(request.basicLivingCost + request.leisureCost)
+                .multiply(BigDecimal.valueOf(12))
+                .multiply(inflationMultiplier);
 
-        double income = 0;
+        BigDecimal income = BigDecimal.ZERO;
 
-        double yearlyExpense =
-            (request.basicLivingCost + request.leisureCost)
-            * 12
-            * inflationMultiplier;
-
+        // 給与収入
         if (age < request.retirementAge) {
-            double salaryNet =
-                request.salaryAfter60 * 12 * SALARY_NET_RATE;
-            income += salaryNet;
+            income = income.add(BigDecimal.valueOf(request.salaryAfter60).multiply(BigDecimal.valueOf(12)).multiply(SALARY_NET_RATE));
         }
 
+        // 年金収入
         if (age >= request.pensionStartAge) {
-
-            double pensionNet =
-                request.publicPension
-                * 12
-                * pensionMultiplier
-                * PENSION_NET_RATE;
-
-            income += pensionNet;
+            income = income.add(BigDecimal.valueOf(request.publicPension).multiply(BigDecimal.valueOf(12)).multiply(pensionMultiplier).multiply(PENSION_NET_RATE));
         }
 
-        double shortfall = yearlyExpense - income;
+        BigDecimal shortfall = yearlyExpense.subtract(income);
+        BigDecimal currentBalance = startBalance;
 
-        if (shortfall > 0 && balance > 0 && age >= request.pensionStartAge) {
-
-            double withdrawalNeeded =
-                shortfall / PENSION_NET_RATE;
-
-            double withdrawal =
-                Math.min(withdrawalNeeded, balance);
-
-            balance -= withdrawal;
-
-            income += withdrawal * PENSION_NET_RATE;
+        // 不足分をDC残高から取り崩し
+        if (shortfall.compareTo(BigDecimal.ZERO) > 0 && currentBalance.compareTo(BigDecimal.ZERO) > 0 && age >= request.pensionStartAge) {
+            // 取り崩し額（額面）の計算
+            BigDecimal withdrawalNeeded = shortfall.divide(PENSION_NET_RATE, 10, RoundingMode.HALF_UP);
+            BigDecimal withdrawal = currentBalance.min(withdrawalNeeded);
+            currentBalance = currentBalance.subtract(withdrawal);
+            income = income.add(withdrawal.multiply(PENSION_NET_RATE));
         }
 
-        if (balance < 0) {
-            balance = 0;
-        }
+        // 年末残高計算（利回りの適用）
+        BigDecimal totalReturnRate = BigDecimal.valueOf(request.dcReturnRate).add(randomReturn);
+        BigDecimal endBalance = currentBalance.multiply(BigDecimal.ONE.add(totalReturnRate));
+        if (endBalance.compareTo(BigDecimal.ZERO) < 0) endBalance = BigDecimal.ZERO;
 
-        YearResult year = new YearResult();
-        year.age = age;
-        year.income = Math.round(income);
-        year.expense = Math.round(yearlyExpense);
-        year.balance = balance;
-
-        return year;
-    }
-
-    private double calculateYearEndBalance(SimulationRequest request,
-            double balance, double returnRate) {
-        return balance * (1 + request.dcReturnRate + returnRate);
-    }
-
-    private void validateRequest(SimulationRequest request) {
-        if (request.startAge < 0 || request.lifeExpectancy <= 0) {
-            throw new IllegalArgumentException("Invalid age parameters");
-        }
-        if (request.startAge >= request.lifeExpectancy) {
-            throw new IllegalArgumentException("startAge must be less than lifeExpectancy");
-        }
-        if (request.retirementAge < 0 || request.pensionStartAge < 0) {
-            throw new IllegalArgumentException("Invalid retirement or pension age");
-        }
-        if (request.inflationRate < 0 || request.dcReturnRate < -1) {
-            throw new IllegalArgumentException("Invalid rate parameters");
-        }
-        if (request.dcBalance < 0 || request.basicLivingCost < 0 || request.leisureCost < 0) {
-            throw new IllegalArgumentException("Invalid cost parameters");
-        }
-    }
-
-    private double[] simulateSingleYear(SimulationRequest request, int age,
-            double balance, double inflationMultiplier, double pensionMultiplier,
-            double returnRate) {
-
-        YearResult year = simulateYear(
-            request, age, balance, inflationMultiplier, pensionMultiplier);
-
-        balance = calculateYearEndBalance(request, year.balance, returnRate);
-
-        if (balance <= 0) {
-            balance = 0;
-        }
-
-        inflationMultiplier *= (1 + request.inflationRate);
-
+        // 次の年のマルチプライヤー準備
+        BigDecimal nextInflationMultiplier = inflationMultiplier.multiply(BigDecimal.ONE.add(BigDecimal.valueOf(request.inflationRate)));
+        BigDecimal nextPensionMultiplier = pensionMultiplier;
         if (age >= request.pensionStartAge) {
-            pensionMultiplier *= (1 + request.inflationRate * 0.8);
+            // マクロ経済スライド等を想定した0.8倍の調整
+            BigDecimal pensionAdjustment = BigDecimal.valueOf(request.inflationRate).multiply(new BigDecimal("0.8"));
+            nextPensionMultiplier = pensionMultiplier.multiply(BigDecimal.ONE.add(pensionAdjustment));
         }
 
-        return new double[] {balance, inflationMultiplier, pensionMultiplier};
+        return new SimulationStepResult(income, yearlyExpense, endBalance, nextInflationMultiplier, nextPensionMultiplier);
     }
 
     private double calculateFailureProbability(SimulationRequest request) {
-
         int simulations = 1000;
         int failureCount = 0;
 
         for (int i = 0; i < simulations; i++) {
-
-            double balance = request.dcBalance;
-
-            double inflationMultiplier = 1.0;
-            double pensionMultiplier = 1.0;
+            BigDecimal balance = BigDecimal.valueOf(request.dcBalance);
+            BigDecimal inflationMultiplier = BigDecimal.ONE;
+            BigDecimal pensionMultiplier = BigDecimal.ONE;
 
             for (int age = request.startAge; age <= request.lifeExpectancy; age++) {
+                BigDecimal randomReturn = BigDecimal.valueOf(request.returnVolatility * ThreadLocalRandom.current().nextGaussian());
+                
+                SimulationStepResult result = runYearlyStep(request, age, balance, inflationMultiplier, pensionMultiplier, randomReturn);
+                balance = result.endBalance;
+                inflationMultiplier = result.nextInflationMultiplier;
+                pensionMultiplier = result.nextPensionMultiplier;
 
-                double randomReturn =
-                    request.returnVolatility * ThreadLocalRandom.current().nextGaussian();
-
-                double[] result = simulateSingleYear(request, age, balance,
-                    inflationMultiplier, pensionMultiplier, randomReturn);
-                balance = result[0];
-                inflationMultiplier = result[1];
-                pensionMultiplier = result[2];
-
-                if (balance <= 0) {
+                if (balance.compareTo(BigDecimal.ZERO) <= 0) {
                     failureCount++;
                     break;
                 }
             }
         }
-
         return (double) failureCount / simulations;
+    }
+
+    private void validateRequest(SimulationRequest request) {
+        if (request.getStartAge() < 0 || request.getLifeExpectancy() <= 0 || request.getStartAge() >= request.getLifeExpectancy()) {
+            throw new IllegalArgumentException("Invalid age parameters");
+        }
+    }
+
+    private static class SimulationStepResult {
+        final BigDecimal income;
+        final BigDecimal expense;
+        final BigDecimal endBalance;
+        final BigDecimal nextInflationMultiplier;
+        final BigDecimal nextPensionMultiplier;
+
+        SimulationStepResult(BigDecimal income, BigDecimal expense, BigDecimal endBalance, BigDecimal nextInflationMultiplier, BigDecimal nextPensionMultiplier) {
+            this.income = income;
+            this.expense = expense;
+            this.endBalance = endBalance;
+            this.nextInflationMultiplier = nextInflationMultiplier;
+            this.nextPensionMultiplier = nextPensionMultiplier;
+        }
     }
 }
